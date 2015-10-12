@@ -62,12 +62,10 @@ class persistentdict(dict):
     def __init__(_,*a,**kw):
         import sqlite3
         dict.__init__(_,*a,**kw)
-        print "INIT", (a, kw)
-        _.db = sqlite3.connect(Config.get('db_file','/tmp/authsvr.db'))
+        _.db = sqlite3.connect(Config['db_file'])
         _.db.execute('CREATE TABLE IF NOT EXISTS user' +
                      '(k text PRIMARY KEY, v text)')
         for k,v in _.db.execute('SELECT k,v FROM user'):
-            print "K AND V", repr( (k,v) )
             _._setitem( k, json.loads(v) )
             pass
         pass
@@ -94,12 +92,6 @@ Thing.refresh_twitter()
 Thing.refresh_facebook()
 
 def verify(token=None):
-    print '      verify'
-    print '*'*40
-    print 1, 2, 3, dict(request.headers)
-    print 4, 5, 6, dict(request.cookies)
-    print '*'*40
-    print
     if token is None:
         token = (request.params.get('access_token',None) or
                  request.headers.get('Authorization',None) or
@@ -138,7 +130,6 @@ def _():
 @route('/app/start')
 def _():
     uid = verify()
-    print "UID", uid
     response.set_cookie('access_token',uid['token'],path='/')
     redirect( "/app/main" )
     return ["hello ", str(uid), '<hr><a href="/app/main?access_token='+
