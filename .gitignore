@@ -1,0 +1,8 @@
+# python artifacts
+*.pyc
+*.pyo
+
+# emacs backups
+*~
+.\#*
+\#*
