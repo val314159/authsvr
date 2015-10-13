@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, Column, Integer, Sequence, String, Table, 
 from sqlalchemy.ext.declarative import declarative_base
 from uuid import uuid1, uuid4
 
-from model_plugin import engine
+from models_plugin import engine
 from models import Base,User,Token
 
 from sqlalchemy.orm import sessionmaker

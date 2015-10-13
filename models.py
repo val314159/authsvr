@@ -1,8 +1,5 @@
-from sqlalchemy import create_engine, Column, Integer, Sequence, String, Table, MetaData, ForeignKey
+from sqlalchemy import Column, Integer, Sequence, String, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from uuid import uuid1, uuid4
-
-from config_auth import Config
 
 Base = declarative_base()
 
