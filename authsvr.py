@@ -5,13 +5,78 @@ virtualenv .ve
 .ve/bin/pip install rauth==0.7.1
 .ve/bin/pip install gevent==1.0.2
 .ve/bin/pip install requests-oauthlib==0.5.0
+.ve/bin/pip install SQLAlchemy==1.0.8
+.ve/bin/pip install bottle-extras==0.1.0
+.ve/bin/pip install bottle-sqlalchemy==0.4.2
+.ve/bin/pip install bottle-web2pydal==0.0.1
 
 """
 from gevent import monkey;monkey.patch_all()
-import json
+import bottle,json
 from bottle import route, run, template, request, response, hook
-from bottle import abort, redirect, default_app, HTTPResponse
+from bottle import abort, redirect, default_app, HTTPResponse, HTTPError
+from bottle.ext import sqlalchemy
+from sqlalchemy import create_engine, Column, Integer, Sequence, String
+from sqlalchemy.ext.declarative import declarative_base
 from uuid import uuid1, uuid4
+
+Base = declarative_base()
+#engine = create_engine('sqlite://', echo=True)
+engine = create_engine('sqlite:////tmp/my.db', echo=True)
+
+app = default_app()
+plugin = sqlalchemy.Plugin(
+    engine, # SQLAlchemy engine created with create_engine function.
+    Base.metadata, # SQLAlchemy metadata, required only if create=True.
+    keyword='db', # Keyword used to inject session database in a route (default 'db').
+    create=True, # If it is true, execute `metadata.create_all(engine)` when plugin is applied (default False).
+    commit=True, # If it is true, plugin commit changes after route is executed (default True).
+    use_kwargs=False # If it is true and keyword is not defined, plugin uses **kwargs argument to inject session database (default False).
+)
+
+app.install(plugin)
+
+class Entity(Base):
+    __tablename__ = 'entity'
+    id = Column(Integer, Sequence('id_seq'), primary_key=True)
+    name = Column(String(50))
+    value = Column(String())
+    fb_id = Column(String())
+    tw_id = Column(String())
+
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+    def __repr__(self):
+        return "<Entity('%d', '%s', '%s')>" % (self.id, self.name, self.value)
+
+
+@app.get('/:name')
+def show(name, db):
+    entity = db.query(Entity).filter_by(name=name).first()
+    if entity:
+        return {'id': entity.id, 'name': entity.name}
+    return HTTPError(404, 'Entity not found.')
+
+@app.put('/:name')
+def put_name(name, db):
+    entity = Entity(name)
+    db.add(entity)
+
+@app.get('/put/:name')
+def put_name(name, db):
+    entity = Entity(name,"VAL")
+    db.add(entity)
+
+@app.get('/spam/:eggs', sqlalchemy=dict(use_kwargs=True))
+@bottle.jinja2_view('some_view')
+def route_with_view(eggs, db):
+    # do something useful here
+    pass
+
+
+
 
 from config_auth import Config
 
@@ -79,7 +144,6 @@ class persistentdict(dict):
         return ret
     pass
 
-app = default_app()
 if Config.get('db_type') == 'sqlite3':
     app.users = persistentdict()
 elif not Config.get('db_type'):
