@@ -16,9 +16,11 @@ import bottle,json
 from bottle import route, run, template, request, response, hook
 from bottle import abort, redirect, default_app, HTTPResponse, HTTPError
 from bottle.ext import sqlalchemy
-from sqlalchemy import create_engine, Column, Integer, Sequence, String
+from sqlalchemy import create_engine, Column, Integer, Sequence, String, Table, MetaData, select
 from sqlalchemy.ext.declarative import declarative_base
 from uuid import uuid1, uuid4
+
+from config_auth import Config
 
 Base = declarative_base()
 #engine = create_engine('sqlite://', echo=True)
@@ -36,49 +38,20 @@ plugin = sqlalchemy.Plugin(
 
 app.install(plugin)
 
-class Entity(Base):
-    __tablename__ = 'entity'
-    id = Column(Integer, Sequence('id_seq'), primary_key=True)
-    name = Column(String(50))
-    value = Column(String())
-    fb_id = Column(String())
-    tw_id = Column(String())
+metadata = MetaData()
+users = Table('users', metadata,
+              Column('uid',   String, unique=True, index=True, primary_key=True),
+              Column('fb_id', String, unique=True, index=True),
+              Column('tw_id', String, unique=True, index=True),
+              Column('value', String),
+              )
+users = Table('tokens', metadata,
+              Column('uid',   String, unique=True, index=True, primary_key=True),
+              Column('token', String, unique=True, index=True),
+              )
+metadata.create_all(engine) 
 
-    def __init__(self, name, value):
-        self.name = name
-        self.value = value
-
-    def __repr__(self):
-        return "<Entity('%d', '%s', '%s')>" % (self.id, self.name, self.value)
-
-
-@app.get('/:name')
-def show(name, db):
-    entity = db.query(Entity).filter_by(name=name).first()
-    if entity:
-        return {'id': entity.id, 'name': entity.name}
-    return HTTPError(404, 'Entity not found.')
-
-@app.put('/:name')
-def put_name(name, db):
-    entity = Entity(name)
-    db.add(entity)
-
-@app.get('/put/:name')
-def put_name(name, db):
-    entity = Entity(name,"VAL")
-    db.add(entity)
-
-@app.get('/spam/:eggs', sqlalchemy=dict(use_kwargs=True))
-@bottle.jinja2_view('some_view')
-def route_with_view(eggs, db):
-    # do something useful here
-    pass
-
-
-
-
-from config_auth import Config
+conn = engine.connect()
 
 @hook('after_request')
 def enable_cors():
@@ -123,32 +96,25 @@ class AuthThing(object):
 
     pass
 
-class persistentdict(dict):
-    def __init__(_,*a,**kw):
-        import sqlite3
-        dict.__init__(_,*a,**kw)
-        _.db = sqlite3.connect(Config['db_file'])
-        _.db.execute('CREATE TABLE IF NOT EXISTS user' +
-                     '(k text PRIMARY KEY, v text)')
-        for k,v in _.db.execute('SELECT k,v FROM user'):
-            _._setitem( k, json.loads(v) )
-            pass
-        pass
-    def _setitem(_,k,v): return dict.__setitem__( _, k, v )
-    def __setitem__(_,k,v):
-        ret = _._setitem( k, v )
-        print "SAVE", (k, json.dumps(v))
-        _.db.execute('INSERT INTO user (k,v) VALUES (?,?)', 
-                     (k,json.dumps(v)))
-        _.db.commit()
-        return ret
-    pass
+class persistentdict(object):
+    def get(_,k,d=None):
+        try:
+            return _[k]
+        except IndexError:
+            return d
 
-if Config.get('db_type') == 'sqlite3':
-    app.users = persistentdict()
-elif not Config.get('db_type'):
-    app.users = dict()
-    pass
+    def __getitem__(_,k):
+        try:
+            print "GETITEM", k
+            value, = conn.execute(
+                select([users.c.value])
+                .where(users.c.token == k)).fetchone()
+            print "GETITEM V", value
+            return json.loads( value )
+        except:
+            raise IndexError
+
+app.users = persistentdict()
 
 Thing = AuthThing()
 Thing.update(**Config)
@@ -162,6 +128,7 @@ def verify(token=None):
                  request.get_cookie('access_token'))
         pass
     if token and token.startswith('Bearer '): token = token[7:] # hacky
+    print "TOKEN", token
     user = app.users.get(token)
     if not user:
         raise abort(401, "Sorry, access denied.")
@@ -200,15 +167,17 @@ def _():
             uid['token']+'">GO TO MAIN</a>']
 
 @route('/anon/login')
-@route('/anonymous/login')
 def _():
     uid = str( uuid1() )
     token = str( uuid4() )
-    app.users[token] = dict( uid = uid, anonymous = True )
-    result = dict( app.users[token], token = token )
+
+    jstr = json.dumps( dict( anonymous = True ) )
+
+    conn.execute( users.insert()
+                  .values(uid=uid, token=token, value=jstr) )
+
     redirect_url = Config['main_redirect']
     raise redirect(redirect_url + '?access_token=' + token )
-    #return dict( result = result )
 
 @route('/fb/update')
 def _():
@@ -246,11 +215,24 @@ def _():
     me = Thing.oauth_session.fetch_access_token(access_token_url)
     uid = str( uuid1() )
     token = str( uuid4() )
-    app.users[token] = dict( uid = uid, twitter = me )
-    result = dict( app.users[token], token=token )
+
+    tw_id = me['user_id']
+    jstr = json.dumps( me )
+
+    try:
+        # create a new one
+        conn.execute( users.insert()
+                      .values(uid=uid, token=token, tw_id=tw_id, value=jstr) )
+    except:
+        # unless it already exists
+        # then just update.  uid stays the same, token gets updated
+        conn.execute( users.update()
+                      .values( token=token, value=jstr ).where(
+                          users.c.tw_id==tw_id ) )
+        pass
+
     redirect_url = Config['main_redirect']
     raise redirect(redirect_url + '?access_token=' + token )
-    #return dict( result = result )
 
 @route('/fb/login/test')
 def _(): return ["<a href='%s'>FACEBOOK LOGIN</a>" % Thing['fb_login']]
@@ -265,10 +247,23 @@ def _():
     me = session.get('me').json()
     uid = str( uuid1() )
     token = str( uuid4() )
-    app.users[token] = dict( uid = uid, facebook = me )
-    result = dict( app.users[token], token=token )
+
+    fb_id = me['id']
+    jstr = json.dumps( me )
+
+    try:
+        # create a new one
+        conn.execute( users.insert()
+                      .values(uid=uid, token=token, fb_id=fb_id, value=jstr) )
+    except:
+        # unless it already exists
+        # then just update.  uid stays the same, token gets updated
+        conn.execute( users.update()
+                      .values( token=token, value=jstr ).where(
+                          users.c.fb_id==fb_id ) )
+        pass
+
     redirect_url = Config['main_redirect']
     raise redirect(redirect_url + '?access_token=' + token )
-    #return dict( result = result )
 
 if __name__=='__main__': run(host='', port=9080, server='gevent')
