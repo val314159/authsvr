@@ -1,0 +1,7 @@
+bottle==0.12.8
+rauth==0.7.1
+gevent==1.0.2
+requests-oauthlib==0.5.0
+SQLAlchemy==1.0.8
+bottle-extras==0.1.0
+bottle-sqlalchemy==0.4.2

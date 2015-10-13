@@ -1,18 +1,5 @@
-"""
-# put this in a shell
-virtualenv .ve
-.ve/bin/pip install bottle==0.12.8
-.ve/bin/pip install rauth==0.7.1
-.ve/bin/pip install gevent==1.0.2
-.ve/bin/pip install requests-oauthlib==0.5.0
-.ve/bin/pip install SQLAlchemy==1.0.8
-.ve/bin/pip install bottle-extras==0.1.0
-.ve/bin/pip install bottle-sqlalchemy==0.4.2
-.ve/bin/pip install bottle-web2pydal==0.0.1
-
-"""
 from gevent import monkey;monkey.patch_all()
-import bottle,json
+import os,sys,bottle,json
 from bottle import route, run, template, request, response, hook
 from bottle import abort, redirect, default_app, HTTPResponse, HTTPError
 from bottle.ext import sqlalchemy
@@ -20,44 +7,22 @@ from sqlalchemy import create_engine, Column, Integer, Sequence, String, Table, 
 from sqlalchemy.ext.declarative import declarative_base
 from uuid import uuid1, uuid4
 
-from config_auth import Config
+from model_plugin import engine
+from models import Base,User,Token
 
-Base = declarative_base()
-#engine = create_engine('sqlite://', echo=True)
-engine = create_engine('sqlite:////tmp/my.db', echo=True)
+from sqlalchemy.orm import sessionmaker
+
+from config_auth import Config
+import cors
 
 app = default_app()
-plugin = sqlalchemy.Plugin(
-    engine, # SQLAlchemy engine created with create_engine function.
-    Base.metadata, # SQLAlchemy metadata, required only if create=True.
-    keyword='db', # Keyword used to inject session database in a route (default 'db').
-    create=True, # If it is true, execute `metadata.create_all(engine)` when plugin is applied (default False).
-    commit=True, # If it is true, plugin commit changes after route is executed (default True).
-    use_kwargs=False # If it is true and keyword is not defined, plugin uses **kwargs argument to inject session database (default False).
-)
 
-app.install(plugin)
+Session = sessionmaker(autoflush=True,autocommit=True)
+Session.configure(bind=engine)
 
-metadata = MetaData()
-users = Table('users', metadata,
-              Column('uid',   String, unique=True, index=True, primary_key=True),
-              Column('fb_id', String, unique=True, index=True),
-              Column('tw_id', String, unique=True, index=True),
-              Column('value', String),
-              )
-users = Table('tokens', metadata,
-              Column('uid',   String, unique=True, index=True, primary_key=True),
-              Column('token', String, unique=True, index=True),
-              )
-metadata.create_all(engine) 
-
-conn = engine.connect()
-
-@hook('after_request')
-def enable_cors():
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token'
+app.db_session = Session()
+app.add        = app.db_session.add
+app.query      = app.db_session.query
 
 class AuthThing(object):
     def refresh_facebook(_, **kw):
@@ -88,6 +53,13 @@ class AuthThing(object):
         _.update( **kw )
         pass
 
+    def twitter_get_auth_session(_, query_string):
+        redirect_response = 'http://ccl.io:9080/tw/auth?' + query_string
+        _.oauth_session.parse_authorization_response(redirect_response)
+        access_token_url = 'https://api.twitter.com/oauth/access_token'
+        me = _.oauth_session.fetch_access_token(access_token_url)
+        return me
+
     def __getitem__(_,k): return _.config[k]
     def update(_,**kw):
         if not hasattr(_,'config'): _.config = dict()
@@ -96,52 +68,38 @@ class AuthThing(object):
 
     pass
 
-class persistentdict(object):
-    def get(_,k,d=None):
-        try:
-            return _[k]
-        except IndexError:
-            return d
-
-    def __getitem__(_,k):
-        try:
-            print "GETITEM", k
-            value, = conn.execute(
-                select([users.c.value])
-                .where(users.c.token == k)).fetchone()
-            print "GETITEM V", value
-            return json.loads( value )
-        except:
-            raise IndexError
-
-app.users = persistentdict()
-
 Thing = AuthThing()
 Thing.update(**Config)
 Thing.refresh_twitter()
 Thing.refresh_facebook()
 
-def verify(token=None):
+def verify(token=None, load_user=False):
     if token is None:
         token = (request.params.get('access_token',None) or
                  request.headers.get('Authorization',None) or
                  request.get_cookie('access_token'))
         pass
     if token and token.startswith('Bearer '): token = token[7:] # hacky
-    print "TOKEN", token
-    user = app.users.get(token)
+    tok = app.db_session.query(Token).filter_by(token=token).first()
+    if not tok:
+        raise abort(401, "Sorry, access denied.")
+    if not load_user:
+        return token
+    return tok
+    user = app.db_session.query(User).filter_by(uid=tok.uid).first()
     if not user:
         raise abort(401, "Sorry, access denied.")
-    user['token'] = token
-    return user
+    return token, user
+
+LINKS = [
+    '<li><a href="/fb/login/test">FACEBOOK</a>',
+    '<li><a href="/tw/login/test">TWITTER</a>',
+    '<li><a href="/anon/login">ANONYMOUS</a>',
+]
 
 @route('/')
 def _():
-    return [
-        '<li><a href="/fb/login/test">FACEBOOK</a>',
-        '<li><a href="/tw/login/test">TWITTER</a>',
-        '<li><a href="/anon/login">ANONYMOUS</a>',
-    ]
+    return LINKS
 
 @route('/verify/token/<token>')
 def _(token):
@@ -150,21 +108,36 @@ def _(token):
 
 @route('/verify/hello')
 def _():
-    uid = verify()
+    verify()
     return ["hello"]
 
 @route('/app/main')
 def _():
-    uid = verify()
-    return ["<h1>app main</h1>", str(uid), "<hr>", "<a href='/fb/login/test'>Facebook Re-Login</a>"]
+    token = verify()
+
+    tok = verify(load_user=True)
+
+    print >>sys.stderr, "TOK --------------------------------- ", repr(tok)
+    print >>sys.stderr, "TOK --------------------------------- ", repr(tok.token)
+    print >>sys.stderr, "TOK --------------------------------- ", repr(tok.uid)
+
+    user = app.db_session.query(User).filter_by(uid=tok.uid).first()
+    print >>sys.stderr, "USER --------------------------------- ", repr(tok.uid)
+    print >>sys.stderr, "USER --------------------------------- ", repr(tok.uid)
+    print "USER", repr(user)
+    print "USER", repr(user.value)
+
+    return ["<h1>app main</h1>", str((token)), "<hr>"] + LINKS
+
+
+    token, user = verify(load_user=True)
+    return ["<h1>app main</h1>", str((token,user)), "<hr>"] + LINKS
 
 @route('/app/start')
 def _():
-    uid = verify()
-    response.set_cookie('access_token',uid['token'],path='/')
-    redirect( "/app/main" )
-    return ["hello ", str(uid), '<hr><a href="/app/main?access_token='+
-            uid['token']+'">GO TO MAIN</a>']
+    token = verify()
+    response.set_cookie('access_token',token,path='/')
+    raise redirect( "/app/main" )
 
 @route('/anon/login')
 def _():
@@ -173,18 +146,21 @@ def _():
 
     jstr = json.dumps( dict( anonymous = True ) )
 
-    conn.execute( users.insert()
-                  .values(uid=uid, token=token, value=jstr) )
+    user = User(uid=uid, value=jstr)
+    app.db_session.add( user )
+
+    tok  = Token(token=token,uid=uid)
+    app.db_session.add( tok )
+    app.db_session.flush()
 
     redirect_url = Config['main_redirect']
     raise redirect(redirect_url + '?access_token=' + token )
 
-@route('/fb/update')
+@route('/settings/update')
 def _():
     req = dict(request.params)
-    Thing.refresh_facebook( req.get('client_id'),
-                            req.get('client_secret'),
-                            req.get('redirect_uri') )
+    Thing.refresh_facebook( *req )
+    Thing.refresh_twitter()
     return ['OK']
 
 @route('/tw/login/test')
@@ -209,27 +185,26 @@ def _():
 
 @route('/tw/auth')
 def _():
-    redirect_response = 'http://ccl.io:9080/tw/auth?' + request.query_string
-    Thing.oauth_session.parse_authorization_response(redirect_response)
-    access_token_url = 'https://api.twitter.com/oauth/access_token'
-    me = Thing.oauth_session.fetch_access_token(access_token_url)
+    me = Thing.twitter_get_auth_session( request.query_string )
+
     uid = str( uuid1() )
     token = str( uuid4() )
 
     tw_id = me['user_id']
     jstr = json.dumps( me )
 
-    try:
-        # create a new one
-        conn.execute( users.insert()
-                      .values(uid=uid, token=token, tw_id=tw_id, value=jstr) )
-    except:
-        # unless it already exists
-        # then just update.  uid stays the same, token gets updated
-        conn.execute( users.update()
-                      .values( token=token, value=jstr ).where(
-                          users.c.tw_id==tw_id ) )
+    user = app.db_session.query(User).filter_by(tw_id=tw_id).first()
+    if user:
+        user.value = jstr
+        app.db_session.merge( user )
+    else:
+        user = User(uid=uid, tw_id=tw_id, value=jstr)
+        app.db_session.add( user )
         pass
+
+    tok  = Token(token=token,uid=user.uid)
+    app.db_session.add( tok )
+    app.db_session.flush()
 
     redirect_url = Config['main_redirect']
     raise redirect(redirect_url + '?access_token=' + token )
@@ -251,17 +226,18 @@ def _():
     fb_id = me['id']
     jstr = json.dumps( me )
 
-    try:
-        # create a new one
-        conn.execute( users.insert()
-                      .values(uid=uid, token=token, fb_id=fb_id, value=jstr) )
-    except:
-        # unless it already exists
-        # then just update.  uid stays the same, token gets updated
-        conn.execute( users.update()
-                      .values( token=token, value=jstr ).where(
-                          users.c.fb_id==fb_id ) )
+    user = app.db_session.query(User).filter_by(fb_id=fb_id).first()
+    if user:
+        user.value = jstr
+        app.db_session.merge( user )
+    else:
+        user = User(uid=uid, fb_id=fb_id, value=jstr)
+        app.db_session.add( user )
         pass
+
+    tok  = Token(token=token,uid=user.uid)
+    app.db_session.add( tok )
+    app.db_session.flush()
 
     redirect_url = Config['main_redirect']
     raise redirect(redirect_url + '?access_token=' + token )
